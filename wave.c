@@ -70,7 +70,10 @@ releaseInline float sinF32(float num) {
     return num;
 }
 
-releaseInline void sinWide(float* num) {
+// NOTE: This attribute prevents the compiler from optimizing this function away.
+// this is also the reason why we cannot inline this
+__attribute__((optnone))
+void sinWide(float* num) {
     asm(
         "mov r8, %1                 \n"
         "fld DWORD PTR [r8]         \n"
