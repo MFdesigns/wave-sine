@@ -5,6 +5,7 @@
 #include <math.h>
 
 #define USE_SIMD_256            1
+#define USE_THREADS             1
 
 #define PAGE_SIZE               4096
 #define CACHE_LINE_SIZE         64
@@ -58,7 +59,7 @@ typedef struct Wave {
 #define BITS_PER_SAMPLE     16
 #define SAMPLE_RATE         44100
 #define CHANNEL_COUNT       1
-#define DURATION_IN_SEC     1
+#define DURATION_IN_SEC     60
 
 releaseInline float sinF32(float num) {
     asm("fld DWORD PTR %1     \n"
@@ -169,12 +170,57 @@ struct SamplerJob {
     struct Wave* wave;
     uint32_t workCount;
     uint8_t* outputBuffer;
+    uint32_t startIndex;
 };
 
 uint32_t samplerThreadMain(void* param) {
     struct SamplerJob* job = param;
+    struct Wave* wave = job->wave;
+    
     uint32_t threadId = GetCurrentThreadId();
     printf("Hello from thread %u\n", threadId);
+
+    float startIndex = (float)job->startIndex;
+    __m256 sampleIndices = {
+        startIndex, startIndex + 1.0, startIndex + 2.0, startIndex + 3.0,
+        startIndex + 4.0, startIndex + 5.0, startIndex + 6.0, startIndex + 7.0
+    };
+
+    float sampleIncrement = SIMD_LANE_COUNT;
+    __m256 sampleIndexIncrement = _mm256_broadcast_ss(&sampleIncrement);
+
+    float indexMultiplier = 2.0 * M_PI * wave->frequency;
+    __m256 indexMultipliers = _mm256_broadcast_ss(&indexMultiplier);
+    
+    float sampleRate = SAMPLE_RATE;
+    __m256 denominator = _mm256_broadcast_ss(&sampleRate);
+    __m256 scalingFactors = _mm256_broadcast_ss(&wave->scalingFactor);
+
+    uint8_t* cursor = job->outputBuffer;
+    uint8_t* fileEnd = job->outputBuffer + (job->workCount * 32);
+    while (cursor + SIMD_WIDTH < fileEnd) {
+        __m256 numerator = _mm256_mul_ps(sampleIndices, indexMultipliers);
+        __m256 r = _mm256_div_ps(numerator, denominator);
+        sinWide((float*)&r);
+        __m256 resF32 = _mm256_mul_ps(r, scalingFactors);
+        // TODO: disable rounding!
+        __m256i resU32 = _mm256_cvtps_epi32(resF32);
+
+        __m128i a = _mm256_extractf128_si256(resU32, 0);
+        __m128i b = _mm256_extractf128_si256(resU32, 1);
+
+        asm("movdqa xmm8, %1                \n"
+            "vpackssdw xmm7, xmm8, %2       \n"
+            "movdqa [%0], xmm7      \n"
+            : 
+            : "r"(cursor), "m"(a), "m"(b)
+            : "xmm8"
+        );
+
+        sampleIndices = _mm256_add_ps(sampleIndices, sampleIndexIncrement);
+        cursor += SIMD_WIDTH;
+    }
+
     return 0;
 }
 
@@ -208,6 +254,7 @@ int main() {
         return 1;
     }
 
+#if USE_THREADS
     // Initialize threads
     SYSTEM_INFO sysInfo;
     GetSystemInfo(&sysInfo);
@@ -222,18 +269,41 @@ int main() {
     struct SamplerJob jobs[MAX_THREAD_COUNT];
     HANDLE threads[MAX_THREAD_COUNT];
 
+    uint8_t* dataStart = wave.fileBuffer + sizeof(WaveHeader);
+    uint32_t simdDataSize = wave.fileSize - CACHE_LINE_SIZE;
+    // Start at the first cacheline after the wave header
+    uint8_t* start = wave.fileBuffer + CACHE_LINE_SIZE;
+    // Round down to the last cache line
+    uint32_t cacheLineCount = simdDataSize / CACHE_LINE_SIZE;
+    uint32_t cacheLinesPerThread = cacheLineCount / threadCount;
+    uint32_t lastThreadCacheLineCount = cacheLinesPerThread + (cacheLineCount % threadCount);
+
+    uint8_t* workBufferStart = start;
+    uint32_t startIndex = (start - dataStart) / sizeof(uint16_t);
     for (uint32_t i = 0; i < threadCount; i++) {
         struct SamplerJob* job = &jobs[i];
         job->wave = &wave;
-        job->workCount = 0;
-        job->outputBuffer = 0;
+        // divide by 2 because work unit is 32 bytes
+        job->workCount = cacheLinesPerThread * 2;
+        job->outputBuffer = workBufferStart;
+        job->startIndex = startIndex;
 
-        threads[i] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)samplerThreadMain, job, 0, NULL);
+        if (i + 1 == threadCount) {
+            job->workCount = lastThreadCacheLineCount * 2;
+        }
+
+        workBufferStart += job->workCount * 32;
+        startIndex += (8 * job->workCount);
+    }
+
+    for (uint32_t i = 0; i < threadCount; i++) {
+        threads[i] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)samplerThreadMain, &jobs[i], 0, NULL);
         if (threads[i] == NULL) {
             printf("Error: could not create thread (%lu)\n", GetLastError());
             return 1;
         }
     }
+#endif
 
     // Create header
     WaveHeader* header = (WaveHeader*)wave.fileBuffer;
@@ -254,14 +324,18 @@ int main() {
     wave.frequency = 440.0;
     wave.scalingFactor = powf(2.0, (float)(BITS_PER_SAMPLE - 1)) - 1.0;
 
+#if USE_THREADS == 0
 #if USE_SIMD_256
     generateSamplesSimd256(&wave);
 #else
     generateSamples(&wave);
 #endif
+#endif
 
+#if USE_THREADS
 #define WAIT_MAX_MS     30000
     uint32_t waitOk = WaitForMultipleObjects(threadCount, threads, TRUE, WAIT_MAX_MS);
+#endif
 
     uint32_t bytesWritten = 0;
     BOOL writeOk = WriteFile(outputFile, wave.fileBuffer, wave.fileSize, (LPDWORD)&bytesWritten, NULL);
