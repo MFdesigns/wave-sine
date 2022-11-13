@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <Windows.h>
+#include <math.h>
 
 #define PAGE_SIZE               4096
+#define M_PI                    3.14159265358979323846f
 
 #define WAVE_FORMAT_PCM         1
 
@@ -35,7 +37,7 @@ typedef struct WaveHeader {
 #define BITS_PER_SAMPLE     16
 #define SAMPLE_RATE         44100
 #define CHANNEL_COUNT       1
-#define DURATION_IN_SEC     3
+#define DURATION_IN_SEC     10
 
 int main() {
     uint32_t sampleCount = DURATION_IN_SEC * SAMPLE_RATE * CHANNEL_COUNT;
@@ -67,18 +69,30 @@ int main() {
     // Create header
     WaveHeader* header = (WaveHeader*)fileBuffer;
     header->riff = WAVE_MAGIC_RIFF;
-    header->fileSize = fileSize;
+    header->fileSize = fileSize - 8;
     header->wave = WAVE_MAGIC_WAVE;
     header->fmt = WAVE_MAGIC_FMT;
     header->fmtSize = 16;
     header->formatType = WAVE_FORMAT_PCM;
     header->numberOfChannels = CHANNEL_COUNT;
     header->sampleRate = SAMPLE_RATE;
-    header->byteRate = SAMPLE_RATE * BITS_PER_SAMPLE * CHANNEL_COUNT;
+    header->byteRate = (SAMPLE_RATE * BITS_PER_SAMPLE * CHANNEL_COUNT) / 8;
     header->blockAlign = (CHANNEL_COUNT * BITS_PER_SAMPLE) / 8;
     header->bitsPerSample = BITS_PER_SAMPLE;
     header->dataHeader = WAVE_MAGIC_DATA;
     header->dataSize = dataSize;
+
+    {
+        uint16_t* cursor = (uint16_t*)(fileBuffer + sizeof(WaveHeader));
+
+        float freq = 440.0;
+        float scalingFactor = powf(2.0, (float)(BITS_PER_SAMPLE - 1)) - 1.0;
+        for (uint32_t i = 0; i < SAMPLE_RATE * DURATION_IN_SEC; i++) {
+            float sample = scalingFactor * sinf(((float)i * 2.0 * M_PI * freq) / (float)SAMPLE_RATE);
+            *cursor = (uint16_t)sample;
+            cursor++;
+        }
+    }
 
     uint32_t bytesWritten = 0;
     BOOL writeOk = WriteFile(outputFile, fileBuffer, fileSize, (LPDWORD)&bytesWritten, NULL);
