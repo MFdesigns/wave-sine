@@ -5,6 +5,7 @@
 
 #define PAGE_SIZE               4096
 #define M_PI                    3.14159265358979323846f
+#define alwaysInline            __attribute__((always_inline))
 
 #define WAVE_FORMAT_PCM         1
 
@@ -38,6 +39,16 @@ typedef struct WaveHeader {
 #define SAMPLE_RATE         44100
 #define CHANNEL_COUNT       1
 #define DURATION_IN_SEC     10
+
+alwaysInline float sinF32(float num) {
+    asm("fld DWORD PTR %1     \n"
+        "fsqrt                \n"
+        "fst DWORD PTR %0     \n"
+        : "=m" (num)
+        : "m" (num)
+    );
+    return num;
+}
 
 int main() {
     uint32_t sampleCount = DURATION_IN_SEC * SAMPLE_RATE * CHANNEL_COUNT;
@@ -88,7 +99,7 @@ int main() {
         float freq = 440.0;
         float scalingFactor = powf(2.0, (float)(BITS_PER_SAMPLE - 1)) - 1.0;
         for (uint32_t i = 0; i < SAMPLE_RATE * DURATION_IN_SEC; i++) {
-            float sample = scalingFactor * sinf(((float)i * 2.0 * M_PI * freq) / (float)SAMPLE_RATE);
+            float sample = scalingFactor * sinF32(((float)i * 2.0 * M_PI * freq) / (float)SAMPLE_RATE);
             *cursor = (uint16_t)sample;
             cursor++;
         }
