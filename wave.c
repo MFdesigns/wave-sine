@@ -165,6 +165,19 @@ releaseInline void generateSamples(Wave* wave) {
     }
 }
 
+struct SamplerJob {
+    struct Wave* wave;
+    uint32_t workCount;
+    uint8_t* outputBuffer;
+};
+
+uint32_t samplerThreadMain(void* param) {
+    struct SamplerJob* job = param;
+    uint32_t threadId = GetCurrentThreadId();
+    printf("Hello from thread %u\n", threadId);
+    return 0;
+}
+
 int main() {
     uint32_t sampleCount = DURATION_IN_SEC * SAMPLE_RATE * CHANNEL_COUNT;
     uint32_t dataSize = sampleCount * sizeof(uint16_t);
@@ -195,6 +208,33 @@ int main() {
         return 1;
     }
 
+    // Initialize threads
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    uint32_t physicalThreadCount = sysInfo.dwNumberOfProcessors;
+
+#define MAX_THREAD_COUNT    16
+    uint32_t threadCount = physicalThreadCount; 
+    if (physicalThreadCount > MAX_THREAD_COUNT) {
+        threadCount = MAX_THREAD_COUNT;
+    }
+
+    struct SamplerJob jobs[MAX_THREAD_COUNT];
+    HANDLE threads[MAX_THREAD_COUNT];
+
+    for (uint32_t i = 0; i < threadCount; i++) {
+        struct SamplerJob* job = &jobs[i];
+        job->wave = &wave;
+        job->workCount = 0;
+        job->outputBuffer = 0;
+
+        threads[i] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)samplerThreadMain, job, 0, NULL);
+        if (threads[i] == NULL) {
+            printf("Error: could not create thread (%lu)\n", GetLastError());
+            return 1;
+        }
+    }
+
     // Create header
     WaveHeader* header = (WaveHeader*)wave.fileBuffer;
     header->riff = WAVE_MAGIC_RIFF;
@@ -219,6 +259,9 @@ int main() {
 #else
     generateSamples(&wave);
 #endif
+
+#define WAIT_MAX_MS     30000
+    uint32_t waitOk = WaitForMultipleObjects(threadCount, threads, TRUE, WAIT_MAX_MS);
 
     uint32_t bytesWritten = 0;
     BOOL writeOk = WriteFile(outputFile, wave.fileBuffer, wave.fileSize, (LPDWORD)&bytesWritten, NULL);
