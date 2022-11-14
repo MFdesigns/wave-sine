@@ -6,6 +6,7 @@
 
 #define USE_SIMD_256            1
 #define USE_THREADS             1
+#define MAX_THREAD_COUNT        16
 
 #define PAGE_SIZE               4096
 #define CACHE_LINE_SIZE         64
@@ -71,40 +72,22 @@ releaseInline float sinF32(float num) {
     return num;
 }
 
-// NOTE: This attribute prevents the compiler from optimizing this function away.
-// this is also the reason why we cannot inline this
-__attribute__((optnone))
-void sinWide(float* num) {
-    asm(
-        "mov r8, %1                 \n"
-        "fld DWORD PTR [r8]         \n"
-        "fld DWORD PTR [r8 + 4]     \n"
-        "fld DWORD PTR [r8 + 8]     \n"
-        "fld DWORD PTR [r8 + 12]    \n"
-        "fld DWORD PTR [r8 + 16]    \n"
-        "fld DWORD PTR [r8 + 20]    \n"
-        "fld DWORD PTR [r8 + 24]    \n"
-        "fld DWORD PTR [r8 + 28]    \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 28]   \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 24]   \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 20]   \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 16]   \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 12]   \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 8]    \n"
-        "fsin                       \n"
-        "fstp DWORD PTR [r8 + 4]    \n"
-        "fsin                       \n"
-        "fstp  DWORD PTR [r8]       \n"
-        : "=r" (num)
-        : "r" (num)
-        : "r8"
-    );
+releaseInline __m256 fastSin(__m256 x) {
+    // let initial guess to be 1
+    float guess = 1.0f;
+    float two = 2.0f;
+    __m256 z = _mm256_broadcast_ss(&guess);
+    __m256 twos = _mm256_broadcast_ss(&two);
+    for (uint32_t i = 1; i <= 10; i++) {
+        // z -= (z * z - x) / (2 * z);
+        __m256 zPowZ = _mm256_mul_ps(z, z);
+        __m256 zMinusX = _mm256_sub_ps(zPowZ, x);
+        __m256 zMul2 = _mm256_mul_ps(z, twos);
+        __m256 res = _mm256_div_ps(zMinusX, zMul2);
+        z = _mm256_sub_ps(z, res);
+    }
+
+    return z;
 }
 
 releaseInline void generateSamplesSimd256(Wave* wave) {
@@ -134,7 +117,7 @@ releaseInline void generateSamplesSimd256(Wave* wave) {
     while (cursor + SIMD_WIDTH < fileEnd) {
         __m256 numerator = _mm256_mul_ps(sampleIndices, indexMultipliers);
         __m256 r = _mm256_div_ps(numerator, denominator);
-        sinWide((float*)&r);
+        r = fastSin(r);
         __m256 resF32 = _mm256_mul_ps(r, scalingFactors);
         // TODO: disable rounding!
         __m256i resU32 = _mm256_cvtps_epi32(resF32);
@@ -201,7 +184,7 @@ uint32_t samplerThreadMain(void* param) {
     while (cursor + SIMD_WIDTH < fileEnd) {
         __m256 numerator = _mm256_mul_ps(sampleIndices, indexMultipliers);
         __m256 r = _mm256_div_ps(numerator, denominator);
-        sinWide((float*)&r);
+        r = fastSin(r);
         __m256 resF32 = _mm256_mul_ps(r, scalingFactors);
         // TODO: disable rounding!
         __m256i resU32 = _mm256_cvtps_epi32(resF32);
@@ -260,7 +243,6 @@ int main() {
     GetSystemInfo(&sysInfo);
     uint32_t physicalThreadCount = sysInfo.dwNumberOfProcessors;
 
-#define MAX_THREAD_COUNT    16
     uint32_t threadCount = physicalThreadCount; 
     if (physicalThreadCount > MAX_THREAD_COUNT) {
         threadCount = MAX_THREAD_COUNT;
